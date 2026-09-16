@@ -6,7 +6,7 @@
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
         <meta-data android:name="xposedmodule" android:value="true" />
         <meta-data android:name="xposeddescription"
-            android:value="Infinity X rodin: forces real QS background blur through SystemUI while keeping the ROM's native translucent tiles." />
+            android:value="Infinity X rodin: real QS background blur plus iOS 26-style translucent glass plates and specular gradients." />
         <meta-data android:name="xposedminversion" android:value="82" />
     </application>
 </manifest>
