@@ -14,22 +14,18 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * Infinity Glass Vector v0.4
+ * Infinity Glass Vector v0.5
  * Target: Infinity X / Android 16 / POCO X7 Pro (rodin)
  *
- * v0.4 keeps the validated 168 px real SurfaceFlinger background blur from v0.2/v0.3,
- * but changes the Quick Settings tiles from Material-tinted translucent cards into neutral
- * glass plates inspired by the iOS 26 Liquid Glass visual language.
+ * v0.5 keeps the validated real SurfaceFlinger blur and changes strategy:
+ *  1) neutralize Infinity X CustomColorScheme.qsTileColor so Monet/Material You does not
+ *     keep painting the QS surfaces brown/opaque;
+ *  2) make each Compose tile almost transparent;
+ *  3) concentrate the visual energy at the optical edges: a hot top-left rim,
+ *     transparent body, inner dark falloff and weaker lower-right reflection.
  *
- * The glass illusion is produced with:
- *  - low-alpha neutral plate fill
- *  - sharp top-left specular highlight
- *  - translucent middle body
- *  - darker optical falloff
- *  - subtle lower-right secondary reflection
- *  - brighter floating icon insert for dual-target tiles
- *
- * No SystemUI APK is replaced. Hooks are fail-soft.
+ * This is still a runtime Vector/Xposed module. It replaces no SystemUI APK and every hook
+ * is fail-soft so a missing ROM method falls back to the original result.
  */
 public final class InfinityGlassHook implements IXposedHookLoadPackage {
     private static final String TAG = "InfinityGlass";
@@ -37,9 +33,13 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
 
     private static final AtomicBoolean FIRST_FORCED_FRAME = new AtomicBoolean(false);
     private static final AtomicBoolean FIRST_GLASS_TILE = new AtomicBoolean(false);
+    private static final AtomicBoolean FIRST_MONET_NEUTRAL = new AtomicBoolean(false);
 
     private static final long COLOR_TRANSPARENT = 0L;
     private static final long COLOR_WHITE = packSrgb(0xFFFFFFFF);
+    private static final long COLOR_ICE = packSrgb(0xFFF2FAFF);
+    private static final long COLOR_COOL = packSrgb(0xFFDDF2FF);
+    private static final long COLOR_BLACK = packSrgb(0xFF000000);
 
     private static Constructor<?> tileColorsCtor;
     private static Constructor<?> linearGradientCtor;
@@ -49,8 +49,9 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) {
         if (!SYSTEMUI.equals(lpparam.packageName)) return;
 
-        XposedBridge.log(TAG + " v0.4: loading in " + lpparam.packageName);
+        XposedBridge.log(TAG + " v0.5: loading in " + lpparam.packageName);
         installDepthBlurHook(lpparam);
+        installMonetNeutralizerHook(lpparam);
         installTileGlassHook(lpparam);
     }
 
@@ -89,13 +90,13 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
                                 float baseMaxBlur = readMaxBlur(blurUtils);
                                 if (baseMaxBlur <= 0f) return;
 
-                                // Preserve the already validated curve: 168 px at full expansion
-                                // when Infinity X reports baseMax=80 px.
+                                // Keep the curve already proven stable on this rodin build:
+                                // baseMax=80 -> 168 px at full expansion.
                                 float multiplier = 1.25f + (0.85f * smoothStep(expansion));
                                 int desiredBlur = Math.round(baseMaxBlur * multiplier);
                                 int forcedBlur = Math.max(oldBlur, desiredBlur);
 
-                                // Keep the wallpaper stationary behind the glass surface.
+                                // Liquid glass reads better when the scene behind it stays still.
                                 float forcedZoom = 0f;
 
                                 Object newPair = oldPair.getClass()
@@ -104,7 +105,7 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
                                 param.setResult(newPair);
 
                                 if (FIRST_FORCED_FRAME.compareAndSet(false, true)) {
-                                    XposedBridge.log(TAG + " v0.4: BLUR_ACTIVE; shade=" + shade
+                                    XposedBridge.log(TAG + " v0.5: BLUR_ACTIVE; shade=" + shade
                                             + " qs=" + qs
                                             + " oldBlur=" + oldBlur
                                             + " baseMax=" + baseMaxBlur
@@ -112,24 +113,62 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
                                             + " oldZoom=" + oldZoom);
                                 }
                             } catch (Throwable t) {
-                                XposedBridge.log(TAG + " v0.4: blur frame hook failed: " + t);
+                                XposedBridge.log(TAG + " v0.5: blur frame hook failed: " + t);
                             }
                         }
                     }
             );
 
-            XposedBridge.log(TAG + " v0.4: depth-controller hook installed");
+            XposedBridge.log(TAG + " v0.5: depth-controller hook installed");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " v0.4: unable to install blur hook: " + t);
+            XposedBridge.log(TAG + " v0.5: unable to install blur hook: " + t);
         }
     }
 
     /**
-     * Neutral Liquid-Glass-style plates for Compose Quick Settings tiles.
-     *
-     * Unlike v0.3, the plate body no longer inherits the Material You surface tint. That was
-     * responsible for the matte brown appearance in the user's screenshot. The wallpaper can
-     * still tint the glass naturally through the real blur underneath it.
+     * Infinity X uses CustomColorScheme.qsTileColor in tiles, brightness, ringer and footer
+     * controls. That value is sourced from surface_effect_1/2 and therefore carries Monet's
+     * wallpaper tint. Replace only this QS-specific surface with a very low-alpha neutral white.
+     */
+    private static void installMonetNeutralizerHook(
+            final XC_LoadPackage.LoadPackageParam lpparam) {
+        try {
+            final Class<?> customScheme = XposedHelpers.findClass(
+                    "com.android.systemui.qs.panels.ui.compose.infinitegrid.CustomColorScheme",
+                    lpparam.classLoader);
+
+            int hooked = 0;
+            for (final Method method : customScheme.getDeclaredMethods()) {
+                if (!method.getName().startsWith("getQsTileColor")) continue;
+                method.setAccessible(true);
+                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) {
+                        try {
+                            // Compose Color inline class is represented as a packed long.
+                            param.setResult(Long.valueOf(withAlpha(COLOR_WHITE, 10)));
+                            if (FIRST_MONET_NEUTRAL.compareAndSet(false, true)) {
+                                XposedBridge.log(TAG
+                                        + " v0.5: MONET_QS_NEUTRALIZED; method="
+                                        + method.getName() + " alpha=10");
+                            }
+                        } catch (Throwable t) {
+                            XposedBridge.log(TAG + " v0.5: Monet neutralizer frame failed: " + t);
+                        }
+                    }
+                });
+                hooked++;
+            }
+
+            XposedBridge.log(TAG + " v0.5: Monet QS neutralizer installed; methods=" + hooked);
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " v0.5: unable to install Monet QS neutralizer: " + t);
+        }
+    }
+
+    /**
+     * Creates edge-weighted neutral glass plates. The center is deliberately much clearer than
+     * v0.4; the top-left rim and lower-right echo carry the shape instead of a matte body fill.
      */
     private static void installTileGlassHook(final XC_LoadPackage.LoadPackageParam lpparam) {
         try {
@@ -181,112 +220,106 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
                                 boolean dualTarget = XposedHelpers.getBooleanField(
                                         uiState, "handlesSecondaryClick");
 
-                                long originalBackground = XposedHelpers.getLongField(
-                                        original, "background");
-
                                 // android.service.quicksettings.Tile:
                                 // unavailable=0, inactive=1, active=2
                                 final int plateAlpha;
                                 final int edgeHot;
                                 final int edgeShoulder;
-                                final int upperBody;
-                                final int centerBody;
-                                final int lowerBody;
-                                final int lowerReflection;
-                                final int endReflection;
+                                final int bodyAlpha;
+                                final int innerShadow;
+                                final int returnEdge;
+                                final int tailEdge;
                                 final int iconHot;
                                 final int iconBody;
-                                final int iconLow;
+                                final int iconShadow;
                                 final int outlineAlpha;
 
                                 if (state == 2) {
-                                    // Active: more luminous but still transparent, similar to a
-                                    // selected Liquid Glass control rather than a solid accent pill.
-                                    plateAlpha = 34;
-                                    edgeHot = 182;
-                                    edgeShoulder = 118;
-                                    upperBody = 70;
-                                    centerBody = 46;
-                                    lowerBody = 24;
-                                    lowerReflection = 56;
-                                    endReflection = 96;
-                                    iconHot = 188;
-                                    iconBody = 92;
-                                    iconLow = 38;
-                                    outlineAlpha = 132;
+                                    // Active plate: icy and more luminous without becoming opaque.
+                                    plateAlpha = 12;
+                                    edgeHot = 224;
+                                    edgeShoulder = 104;
+                                    bodyAlpha = 26;
+                                    innerShadow = 24;
+                                    returnEdge = 78;
+                                    tailEdge = 34;
+                                    iconHot = 224;
+                                    iconBody = 96;
+                                    iconShadow = 26;
+                                    outlineAlpha = 156;
                                 } else if (state == 1) {
-                                    // Inactive: very clear neutral glass with a crisp rim.
-                                    plateAlpha = 20;
-                                    edgeHot = 132;
-                                    edgeShoulder = 82;
-                                    upperBody = 48;
-                                    centerBody = 30;
-                                    lowerBody = 15;
-                                    lowerReflection = 38;
-                                    endReflection = 70;
-                                    iconHot = 132;
-                                    iconBody = 62;
-                                    iconLow = 24;
-                                    outlineAlpha = 92;
+                                    // Inactive plate: almost clear, shape carried by the rim.
+                                    plateAlpha = 7;
+                                    edgeHot = 178;
+                                    edgeShoulder = 72;
+                                    bodyAlpha = 16;
+                                    innerShadow = 18;
+                                    returnEdge = 52;
+                                    tailEdge = 22;
+                                    iconHot = 176;
+                                    iconBody = 68;
+                                    iconShadow = 20;
+                                    outlineAlpha = 118;
                                 } else {
-                                    plateAlpha = 10;
-                                    edgeHot = 66;
-                                    edgeShoulder = 44;
-                                    upperBody = 26;
-                                    centerBody = 16;
-                                    lowerBody = 8;
-                                    lowerReflection = 20;
-                                    endReflection = 36;
-                                    iconHot = 70;
-                                    iconBody = 36;
-                                    iconLow = 14;
-                                    outlineAlpha = 48;
+                                    plateAlpha = 4;
+                                    edgeHot = 92;
+                                    edgeShoulder = 42;
+                                    bodyAlpha = 9;
+                                    innerShadow = 12;
+                                    returnEdge = 30;
+                                    tailEdge = 14;
+                                    iconHot = 92;
+                                    iconBody = 40;
+                                    iconShadow = 14;
+                                    outlineAlpha = 62;
                                 }
 
-                                // Neutral plate base. Wallpaper color now comes from the blurred
-                                // scene behind it, not from Material You's qsTileColor.
+                                // Barely-visible neutral body: no Material/Monet tile tint.
                                 long background = withAlpha(COLOR_WHITE, plateAlpha);
 
-                                // Seven-stop diagonal optical profile. The first two stops create
-                                // a sharp specular rim; the middle falls away like thicker glass;
-                                // the last two stops create a weaker reflected edge.
-                                List<Long> tileColors = new ArrayList<>();
-                                tileColors.add(withAlpha(COLOR_WHITE, edgeHot));
-                                tileColors.add(withAlpha(COLOR_WHITE, edgeShoulder));
-                                tileColors.add(withAlpha(COLOR_WHITE, upperBody));
-
-                                // Keep a tiny amount of the active system accent inside the center
-                                // only. Inactive plates stay fully neutral.
-                                if (state == 2) {
-                                    tileColors.add(mixTowardWhite(originalBackground, 0.84f, centerBody));
-                                } else {
-                                    tileColors.add(withAlpha(COLOR_WHITE, centerBody));
-                                }
-
-                                tileColors.add(withAlpha(COLOR_WHITE, lowerBody));
-                                tileColors.add(withAlpha(COLOR_WHITE, lowerReflection));
-                                tileColors.add(withAlpha(COLOR_WHITE, endReflection));
-
+                                /*
+                                 * Eight-stop optical profile:
+                                 *   0-6%    hot icy rim
+                                 *   6-20%   quick transparency falloff
+                                 *   20-62%  clear body
+                                 *   62-78%  tiny dark internal refraction cue
+                                 *   92-100% weaker reflected opposite edge
+                                 *
+                                 * Infinity X clips this brush to the rounded tile shape, so the
+                                 * narrow end bands visually read as glass edge highlights rather
+                                 * than as a full matte gradient.
+                                 */
                                 Object tileGradient = createGradient(
-                                        tileColors,
-                                        Arrays.asList(0.00f, 0.045f, 0.13f, 0.42f, 0.72f, 0.92f, 1.00f));
+                                        Arrays.asList(
+                                                withAlpha(COLOR_ICE, edgeHot),
+                                                withAlpha(COLOR_COOL, edgeShoulder),
+                                                withAlpha(COLOR_WHITE, bodyAlpha),
+                                                withAlpha(COLOR_WHITE, Math.max(3, bodyAlpha / 2)),
+                                                withAlpha(COLOR_BLACK, innerShadow),
+                                                withAlpha(COLOR_WHITE, Math.max(2, bodyAlpha / 3)),
+                                                withAlpha(COLOR_ICE, returnEdge),
+                                                withAlpha(COLOR_WHITE, tailEdge)
+                                        ),
+                                        Arrays.asList(
+                                                0.00f, 0.055f, 0.16f, 0.44f,
+                                                0.67f, 0.82f, 0.955f, 1.00f));
 
-                                // Raised circular/square icon insert: brighter and optically denser
-                                // than the surrounding plate, like Control Center controls.
+                                // The dual-target icon insert behaves like a smaller raised lens.
                                 Object iconGradient = createGradient(
                                         Arrays.asList(
-                                                withAlpha(COLOR_WHITE, iconHot),
-                                                withAlpha(COLOR_WHITE, iconBody),
-                                                withAlpha(COLOR_WHITE, iconLow),
-                                                withAlpha(COLOR_WHITE, Math.max(12, iconBody / 2))
+                                                withAlpha(COLOR_ICE, iconHot),
+                                                withAlpha(COLOR_COOL, iconBody),
+                                                withAlpha(COLOR_WHITE, Math.max(10, iconBody / 2)),
+                                                withAlpha(COLOR_BLACK, iconShadow),
+                                                withAlpha(COLOR_WHITE, Math.max(12, iconBody / 3))
                                         ),
-                                        Arrays.asList(0.00f, 0.12f, 0.72f, 1.00f));
+                                        Arrays.asList(0.00f, 0.09f, 0.42f, 0.76f, 1.00f));
 
-                                // For large dual-target tiles, keeping iconBackground transparent is
-                                // required by Infinity X for the full tileBackgroundGradient path.
+                                // Infinity X requires transparent iconBackground on large dual
+                                // targets in order to paint tileBackgroundGradient across the whole tile.
                                 long iconBackground = dualTarget && !iconOnly
                                         ? COLOR_TRANSPARENT
-                                        : withAlpha(COLOR_WHITE, Math.max(12, plateAlpha + 8));
+                                        : withAlpha(COLOR_WHITE, Math.max(7, plateAlpha + 5));
 
                                 long label;
                                 long secondaryLabel;
@@ -296,12 +329,14 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
                                     secondaryLabel = withAlpha(COLOR_WHITE, 92);
                                     iconColor = withAlpha(COLOR_WHITE, 132);
                                 } else {
-                                    label = withAlpha(COLOR_WHITE, 250);
-                                    secondaryLabel = withAlpha(COLOR_WHITE, 208);
+                                    label = withAlpha(COLOR_WHITE, 252);
+                                    secondaryLabel = withAlpha(COLOR_WHITE, 212);
                                     iconColor = withAlpha(COLOR_WHITE, 252);
                                 }
 
-                                long outline = withAlpha(COLOR_WHITE, outlineAlpha);
+                                // Modern Infinity X tiles do not always draw this outline field,
+                                // but keep it bright for classic/icon paths that do consume it.
+                                long outline = withAlpha(COLOR_ICE, outlineAlpha);
 
                                 Object replacement = tileColorsCtor.newInstance(
                                         background,
@@ -315,24 +350,25 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
                                 param.setResult(replacement);
 
                                 if (FIRST_GLASS_TILE.compareAndSet(false, true)) {
-                                    XposedBridge.log(TAG + " v0.4: LIQUID_PLATE_ACTIVE; state=" + state
+                                    XposedBridge.log(TAG + " v0.5: OPTICAL_GLASS_ACTIVE; state=" + state
                                             + " dual=" + dualTarget
                                             + " iconOnly=" + iconOnly
                                             + " plateAlpha=" + plateAlpha
                                             + " edgeHot=" + edgeHot
+                                            + " innerShadow=" + innerShadow
                                             + " outlineAlpha=" + outlineAlpha);
                                 }
                             } catch (Throwable t) {
                                 param.setResult(original);
-                                XposedBridge.log(TAG + " v0.4: tile glass frame failed: " + t);
+                                XposedBridge.log(TAG + " v0.5: optical glass frame failed: " + t);
                             }
                         }
                     }
             );
 
-            XposedBridge.log(TAG + " v0.4: liquid plate hook installed");
+            XposedBridge.log(TAG + " v0.5: optical glass tile hook installed");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " v0.4: unable to install liquid plate hook: " + t);
+            XposedBridge.log(TAG + " v0.5: unable to install optical glass hook: " + t);
         }
     }
 
@@ -368,20 +404,6 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
         int argb = (int) (color >>> 32);
         int rgb = argb & 0x00FFFFFF;
         return packSrgb((a << 24) | rgb);
-    }
-
-    private static long mixTowardWhite(long color, float amount, int alpha) {
-        float t = clamp(amount, 0f, 1f);
-        long low32 = color & 0xFFFFFFFFL;
-        int argb = low32 == 0L ? (int) (color >>> 32) : 0xFFFFFFFF;
-        int r = (argb >>> 16) & 0xFF;
-        int g = (argb >>> 8) & 0xFF;
-        int b = argb & 0xFF;
-        r = Math.round(r + (255 - r) * t);
-        g = Math.round(g + (255 - g) * t);
-        b = Math.round(b + (255 - b) * t);
-        int a = Math.max(0, Math.min(255, alpha));
-        return packSrgb((a << 24) | (r << 16) | (g << 8) | b);
     }
 
     private static long packOffset(float x, float y) {
