@@ -20,8 +20,8 @@ jobs:
       - name: Build debug APK
         run: gradle :app:assembleDebug
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk InfinityGlass-Vector-v0.11.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk InfinityGlass-Vector-v0.12.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: InfinityGlass-Vector-v0.11
-          path: InfinityGlass-Vector-v0.11.apk
+          name: InfinityGlass-Vector-v0.12
+          path: InfinityGlass-Vector-v0.12.apk
