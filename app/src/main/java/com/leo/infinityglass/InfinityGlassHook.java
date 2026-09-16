@@ -1,5 +1,7 @@
 package com.leo.infinityglass;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -7,27 +9,23 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * Infinity Glass Vector v0.1
+ * Infinity Glass Vector v0.2
+ * Target: Infinity X / Android 16 / POCO X7 Pro (rodin)
  *
- * Target:
- *   Infinity X / Android 16 / POCO X7 Pro (rodin)
- *   com.android.systemui.statusbar.NotificationShadeDepthController
- *
- * The ROM already computes a real SurfaceFlinger background blur in
- * computeBlurAndZoomOut(). This hook raises that radius while QS/shade is open,
- * rather than blurring the SystemUI content itself.
- *
- * It deliberately does NOT replace SystemUI.apk and does NOT patch files.
+ * Infinity X clamps its normal shade blur to BlurUtils.maxBlurRadius before
+ * applyBlur(). This hook runs AFTER computeBlurAndZoomOut(), so it can request
+ * a larger real SurfaceFlinger background blur without replacing SystemUI.apk.
  */
 public final class InfinityGlassHook implements IXposedHookLoadPackage {
     private static final String TAG = "InfinityGlass";
     private static final String SYSTEMUI = "com.android.systemui";
+    private static final AtomicBoolean FIRST_FORCED_FRAME = new AtomicBoolean(false);
 
     @Override
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) {
         if (!SYSTEMUI.equals(lpparam.packageName)) return;
 
-        XposedBridge.log(TAG + ": loading in " + lpparam.packageName);
+        XposedBridge.log(TAG + " v0.2: loading in " + lpparam.packageName);
 
         try {
             final Class<?> depthController = XposedHelpers.findClass(
@@ -58,35 +56,43 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
                                 float oldZoom = oldSecond instanceof Number
                                         ? ((Number) oldSecond).floatValue() : 0f;
 
-                                Object blurUtils =
-                                        XposedHelpers.getObjectField(param.thisObject, "blurUtils");
-                                float maxBlur = readMaxBlur(blurUtils);
+                                Object blurUtils = XposedHelpers.getObjectField(
+                                        param.thisObject, "blurUtils");
+                                float baseMaxBlur = readMaxBlur(blurUtils);
+                                if (baseMaxBlur <= 0f) return;
 
-                                if (maxBlur <= 0f) return;
-
-                                float desiredRatio = 0.62f + (0.38f * smoothStep(expansion));
-                                int desiredBlur = Math.round(maxBlur * desiredRatio);
+                                // 1.25x while opening -> 2.10x at fully expanded QS.
+                                // This deliberately bypasses Infinity X's internal max-radius clamp.
+                                float multiplier = 1.25f + (0.85f * smoothStep(expansion));
+                                int desiredBlur = Math.round(baseMaxBlur * multiplier);
                                 int forcedBlur = Math.max(oldBlur, desiredBlur);
 
-                                float forcedZoom = Math.min(oldZoom, 0.0125f);
+                                // Keep the wallpaper stationary instead of pushing it backwards.
+                                float forcedZoom = 0f;
 
                                 Object newPair = oldPair.getClass()
                                         .getConstructor(Object.class, Object.class)
-                                        .newInstance(
-                                                Integer.valueOf(forcedBlur),
-                                                Float.valueOf(forcedZoom)
-                                        );
+                                        .newInstance(Integer.valueOf(forcedBlur), Float.valueOf(forcedZoom));
                                 param.setResult(newPair);
+
+                                if (FIRST_FORCED_FRAME.compareAndSet(false, true)) {
+                                    XposedBridge.log(TAG + " v0.2: ACTIVE; shade=" + shade
+                                            + " qs=" + qs
+                                            + " oldBlur=" + oldBlur
+                                            + " baseMax=" + baseMaxBlur
+                                            + " forcedBlur=" + forcedBlur
+                                            + " oldZoom=" + oldZoom);
+                                }
                             } catch (Throwable t) {
-                                XposedBridge.log(TAG + ": frame hook failed: " + t);
+                                XposedBridge.log(TAG + " v0.2: frame hook failed: " + t);
                             }
                         }
                     }
             );
 
-            XposedBridge.log(TAG + ": depth-controller hook installed");
+            XposedBridge.log(TAG + " v0.2: depth-controller hook installed");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": unable to install hook: " + t);
+            XposedBridge.log(TAG + " v0.2: unable to install hook: " + t);
         }
     }
 
@@ -101,16 +107,13 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
 
     private static float readMaxBlur(Object blurUtils) {
         if (blurUtils == null) return 0f;
-
         try {
             Object result = XposedHelpers.callMethod(blurUtils, "getMaxBlurRadius");
             if (result instanceof Number) return ((Number) result).floatValue();
         } catch (Throwable ignored) {}
-
         try {
             return XposedHelpers.getFloatField(blurUtils, "maxBlurRadius");
         } catch (Throwable ignored) {}
-
         return 0f;
     }
 
