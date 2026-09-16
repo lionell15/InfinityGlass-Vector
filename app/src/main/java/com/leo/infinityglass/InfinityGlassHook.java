@@ -15,19 +15,15 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * Infinity Glass Vector v0.6
+ * Infinity Glass Vector v0.7
  * Target: Infinity X / Android 16 / POCO X7 Pro (rodin)
  *
- * v0.6 is based on the exact SystemUI APK from the device. In that APK the
- * CustomColorScheme source logic has been compiler-inlined into TileDefaults,
- * so there is no runtime CustomColorScheme class to hook. Instead we bypass
- * Material/Monet at the final tile surface itself.
- *
- * Layers:
- *  1) validated real SurfaceFlinger blur (168 px at full shade)
- *  2) optical low-alpha tile gradient
- *  3) force TileExpandable outer surface fully transparent
- *  4) add a real 1 dp Compose border around modern tiles
+ * v0.7 is tuned against the user's iOS 26 Control Center reference:
+ *  - lighter global blur so background colour survives through the glass
+ *  - almost clear neutral/teal inactive glass
+ *  - vivid iOS-blue active icon lenses
+ *  - thin cool-white/cyan physical rim with a faint secondary glow
+ *  - matte Material surface remains fully bypassed
  *
  * No SystemUI APK replacement. All hooks are fail-soft.
  */
@@ -41,8 +37,12 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
 
     private static final long COLOR_TRANSPARENT = 0L;
     private static final long COLOR_WHITE = packSrgb(0xFFFFFFFF);
-    private static final long COLOR_ICE = packSrgb(0xFFF4FBFF);
-    private static final long COLOR_COOL = packSrgb(0xFFDDEEFF);
+    private static final long COLOR_ICE = packSrgb(0xFFF7FCFF);
+    private static final long COLOR_COOL = packSrgb(0xFFD8F4FF);
+    private static final long COLOR_GLASS_TEAL = packSrgb(0xFF88E8E1);
+    private static final long COLOR_IOS_BLUE = packSrgb(0xFF0A84FF);
+    private static final long COLOR_IOS_CYAN = packSrgb(0xFF64D2FF);
+    private static final long COLOR_DEEP_BLUE = packSrgb(0xFF0057D9);
     private static final long COLOR_BLACK = packSrgb(0xFF000000);
 
     private static Constructor<?> tileColorsCtor;
@@ -55,12 +55,16 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) {
         if (!SYSTEMUI.equals(lpparam.packageName)) return;
 
-        XposedBridge.log(TAG + " v0.6: loading in " + lpparam.packageName);
+        XposedBridge.log(TAG + " v0.7: loading in " + lpparam.packageName);
         installDepthBlurHook(lpparam);
         installTileGlassHook(lpparam);
         installTransparentSurfaceAndBorderHook(lpparam);
     }
 
+    /**
+     * The reference image keeps more colour/detail behind the glass than v0.6.
+     * With baseMax=80, full expansion now targets about 104 px instead of 168 px.
+     */
     private static void installDepthBlurHook(final XC_LoadPackage.LoadPackageParam lpparam) {
         try {
             final Class<?> depthController = XposedHelpers.findClass(
@@ -94,7 +98,7 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
                                 float baseMaxBlur = readMaxBlur(blurUtils);
                                 if (baseMaxBlur <= 0f) return;
 
-                                float multiplier = 1.25f + (0.85f * smoothStep(expansion));
+                                float multiplier = 1.05f + (0.25f * smoothStep(expansion));
                                 int desiredBlur = Math.round(baseMaxBlur * multiplier);
                                 int forcedBlur = Math.max(oldBlur, desiredBlur);
 
@@ -104,7 +108,7 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
                                 param.setResult(newPair);
 
                                 if (FIRST_FORCED_FRAME.compareAndSet(false, true)) {
-                                    XposedBridge.log(TAG + " v0.6: BLUR_ACTIVE; shade=" + shade
+                                    XposedBridge.log(TAG + " v0.7: BLUR_ACTIVE; shade=" + shade
                                             + " qs=" + qs
                                             + " oldBlur=" + oldBlur
                                             + " baseMax=" + baseMaxBlur
@@ -112,20 +116,21 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
                                             + " oldZoom=" + oldZoom);
                                 }
                             } catch (Throwable t) {
-                                XposedBridge.log(TAG + " v0.6: blur frame hook failed: " + t);
+                                XposedBridge.log(TAG + " v0.7: blur frame hook failed: " + t);
                             }
                         }
                     });
 
-            XposedBridge.log(TAG + " v0.6: depth-controller hook installed");
+            XposedBridge.log(TAG + " v0.7: depth-controller hook installed");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " v0.6: unable to install blur hook: " + t);
+            XposedBridge.log(TAG + " v0.7: unable to install blur hook: " + t);
         }
     }
 
     /**
-     * Final TileColors replacement. This already bypasses Monet for tile body colors,
-     * so v0.6 no longer tries to hook the non-existent runtime CustomColorScheme class.
+     * Final TileColors replacement. Active icon lenses become iOS blue while the
+     * plate itself remains clear glass. Inactive controls keep a cool teal/white
+     * optical tint rather than Material You's brown surface tint.
      */
     private static void installTileGlassHook(final XC_LoadPackage.LoadPackageParam lpparam) {
         try {
@@ -177,99 +182,96 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
                                 boolean dualTarget = XposedHelpers.getBooleanField(
                                         uiState, "handlesSecondaryClick");
 
-                                final int plateAlpha;
-                                final int edgeHot;
-                                final int edgeShoulder;
-                                final int bodyAlpha;
-                                final int innerShadow;
-                                final int returnEdge;
-                                final int tailEdge;
-                                final int iconHot;
-                                final int iconBody;
-                                final int iconShadow;
-                                final int outlineAlpha;
+                                final boolean active = state == 2;
+                                final boolean unavailable = state == 0;
 
-                                if (state == 2) {
-                                    plateAlpha = 4;
-                                    edgeHot = 230;
-                                    edgeShoulder = 92;
-                                    bodyAlpha = 14;
-                                    innerShadow = 18;
-                                    returnEdge = 70;
-                                    tailEdge = 28;
-                                    iconHot = 232;
-                                    iconBody = 82;
-                                    iconShadow = 22;
-                                    outlineAlpha = 164;
-                                } else if (state == 1) {
-                                    plateAlpha = 0;
-                                    edgeHot = 188;
-                                    edgeShoulder = 56;
-                                    bodyAlpha = 8;
-                                    innerShadow = 12;
-                                    returnEdge = 42;
-                                    tailEdge = 16;
-                                    iconHot = 184;
-                                    iconBody = 52;
-                                    iconShadow = 16;
-                                    outlineAlpha = 126;
+                                // Plate body: deliberately subtle so the blurred wallpaper remains visible.
+                                long background;
+                                if (active && iconOnly) {
+                                    // The visible circular control is painted from iconGradient below.
+                                    background = COLOR_TRANSPARENT;
+                                } else if (active) {
+                                    background = withAlpha(COLOR_COOL, 10);
+                                } else if (unavailable) {
+                                    background = COLOR_TRANSPARENT;
                                 } else {
-                                    plateAlpha = 0;
-                                    edgeHot = 96;
-                                    edgeShoulder = 32;
-                                    bodyAlpha = 4;
-                                    innerShadow = 8;
-                                    returnEdge = 24;
-                                    tailEdge = 10;
-                                    iconHot = 96;
-                                    iconBody = 30;
-                                    iconShadow = 10;
-                                    outlineAlpha = 66;
+                                    background = withAlpha(COLOR_GLASS_TEAL, 7);
                                 }
 
-                                long background = plateAlpha == 0
-                                        ? COLOR_TRANSPARENT
-                                        : withAlpha(COLOR_WHITE, plateAlpha);
+                                Object tileGradient;
+                                if (active) {
+                                    tileGradient = createGradient(
+                                            Arrays.asList(
+                                                    withAlpha(COLOR_ICE, 188),
+                                                    withAlpha(COLOR_IOS_CYAN, 62),
+                                                    withAlpha(COLOR_COOL, 22),
+                                                    withAlpha(COLOR_GLASS_TEAL, 14),
+                                                    withAlpha(COLOR_BLACK, 10),
+                                                    withAlpha(COLOR_COOL, 8),
+                                                    withAlpha(COLOR_IOS_CYAN, 54),
+                                                    withAlpha(COLOR_ICE, 96)
+                                            ),
+                                            Arrays.asList(
+                                                    0.00f, 0.035f, 0.10f, 0.38f,
+                                                    0.67f, 0.84f, 0.968f, 1.00f));
+                                } else {
+                                    tileGradient = createGradient(
+                                            Arrays.asList(
+                                                    withAlpha(COLOR_ICE, unavailable ? 70 : 148),
+                                                    withAlpha(COLOR_IOS_CYAN, unavailable ? 20 : 42),
+                                                    withAlpha(COLOR_GLASS_TEAL, unavailable ? 4 : 13),
+                                                    withAlpha(COLOR_WHITE, unavailable ? 2 : 6),
+                                                    withAlpha(COLOR_BLACK, unavailable ? 5 : 9),
+                                                    withAlpha(COLOR_COOL, unavailable ? 2 : 5),
+                                                    withAlpha(COLOR_IOS_CYAN, unavailable ? 14 : 34),
+                                                    withAlpha(COLOR_ICE, unavailable ? 34 : 74)
+                                            ),
+                                            Arrays.asList(
+                                                    0.00f, 0.035f, 0.10f, 0.40f,
+                                                    0.68f, 0.85f, 0.97f, 1.00f));
+                                }
 
-                                Object tileGradient = createGradient(
-                                        Arrays.asList(
-                                                withAlpha(COLOR_ICE, edgeHot),
-                                                withAlpha(COLOR_COOL, edgeShoulder),
-                                                withAlpha(COLOR_WHITE, bodyAlpha),
-                                                withAlpha(COLOR_WHITE, Math.max(1, bodyAlpha / 2)),
-                                                withAlpha(COLOR_BLACK, innerShadow),
-                                                withAlpha(COLOR_WHITE, Math.max(1, bodyAlpha / 3)),
-                                                withAlpha(COLOR_ICE, returnEdge),
-                                                withAlpha(COLOR_WHITE, tailEdge)
-                                        ),
-                                        Arrays.asList(
-                                                0.00f, 0.028f, 0.075f, 0.37f,
-                                                0.66f, 0.84f, 0.972f, 1.00f));
+                                // Circle/icon lens. Active controls now get the familiar iOS blue.
+                                Object iconGradient;
+                                if (active) {
+                                    iconGradient = createGradient(
+                                            Arrays.asList(
+                                                    withAlpha(COLOR_IOS_CYAN, 248),
+                                                    withAlpha(COLOR_IOS_BLUE, 232),
+                                                    withAlpha(COLOR_IOS_BLUE, 220),
+                                                    withAlpha(COLOR_DEEP_BLUE, 236),
+                                                    withAlpha(COLOR_IOS_CYAN, 196)
+                                            ),
+                                            Arrays.asList(0.00f, 0.10f, 0.46f, 0.82f, 1.00f));
+                                } else {
+                                    iconGradient = createGradient(
+                                            Arrays.asList(
+                                                    withAlpha(COLOR_ICE, unavailable ? 70 : 150),
+                                                    withAlpha(COLOR_IOS_CYAN, unavailable ? 18 : 44),
+                                                    withAlpha(COLOR_GLASS_TEAL, unavailable ? 5 : 18),
+                                                    withAlpha(COLOR_BLACK, unavailable ? 7 : 12),
+                                                    withAlpha(COLOR_ICE, unavailable ? 26 : 58)
+                                            ),
+                                            Arrays.asList(0.00f, 0.08f, 0.44f, 0.78f, 1.00f));
+                                }
 
-                                Object iconGradient = createGradient(
-                                        Arrays.asList(
-                                                withAlpha(COLOR_ICE, iconHot),
-                                                withAlpha(COLOR_COOL, iconBody),
-                                                withAlpha(COLOR_WHITE, Math.max(6, iconBody / 3)),
-                                                withAlpha(COLOR_BLACK, iconShadow),
-                                                withAlpha(COLOR_WHITE, Math.max(8, iconBody / 4))
-                                        ),
-                                        Arrays.asList(0.00f, 0.055f, 0.42f, 0.77f, 1.00f));
-
+                                // For large dual-target controls, the icon lens is drawn separately by LargeTileContent.
                                 long iconBackground = dualTarget && !iconOnly
                                         ? COLOR_TRANSPARENT
-                                        : withAlpha(COLOR_WHITE, state == 2 ? 8 : 3);
+                                        : (active
+                                                ? withAlpha(COLOR_IOS_BLUE, 176)
+                                                : withAlpha(COLOR_GLASS_TEAL, unavailable ? 1 : 5));
 
-                                long label = state == 0
-                                        ? withAlpha(COLOR_WHITE, 132)
+                                long label = unavailable
+                                        ? withAlpha(COLOR_WHITE, 128)
                                         : withAlpha(COLOR_WHITE, 252);
-                                long secondaryLabel = state == 0
-                                        ? withAlpha(COLOR_WHITE, 92)
-                                        : withAlpha(COLOR_WHITE, 212);
-                                long iconColor = state == 0
-                                        ? withAlpha(COLOR_WHITE, 132)
-                                        : withAlpha(COLOR_WHITE, 252);
-                                long outline = withAlpha(COLOR_ICE, outlineAlpha);
+                                long secondaryLabel = unavailable
+                                        ? withAlpha(COLOR_WHITE, 86)
+                                        : withAlpha(COLOR_WHITE, 210);
+                                long iconColor = unavailable
+                                        ? withAlpha(COLOR_WHITE, 128)
+                                        : withAlpha(COLOR_WHITE, 254);
+                                long outline = withAlpha(COLOR_ICE, unavailable ? 58 : (active ? 168 : 126));
 
                                 Object replacement = tileColorsCtor.newInstance(
                                         background,
@@ -283,31 +285,28 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
                                 param.setResult(replacement);
 
                                 if (FIRST_GLASS_TILE.compareAndSet(false, true)) {
-                                    XposedBridge.log(TAG + " v0.6: OPTICAL_GLASS_ACTIVE; state=" + state
+                                    XposedBridge.log(TAG + " v0.7: IOS_GLASS_ACTIVE; state=" + state
+                                            + " active=" + active
                                             + " dual=" + dualTarget
-                                            + " iconOnly=" + iconOnly
-                                            + " plateAlpha=" + plateAlpha
-                                            + " edgeHot=" + edgeHot
-                                            + " outlineAlpha=" + outlineAlpha);
+                                            + " iconOnly=" + iconOnly);
                                 }
                             } catch (Throwable t) {
                                 param.setResult(original);
-                                XposedBridge.log(TAG + " v0.6: optical glass frame failed: " + t);
+                                XposedBridge.log(TAG + " v0.7: iOS glass frame failed: " + t);
                             }
                         }
                     });
 
-            XposedBridge.log(TAG + " v0.6: optical glass tile hook installed");
-            XposedBridge.log(TAG + " v0.6: MONET_TILE_PATH_BYPASSED; exact ROM has inlined color logic");
+            XposedBridge.log(TAG + " v0.7: iOS-style tile glass hook installed");
+            XposedBridge.log(TAG + " v0.7: MONET_TILE_PATH_BYPASSED");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " v0.6: unable to install optical glass hook: " + t);
+            XposedBridge.log(TAG + " v0.7: unable to install tile glass hook: " + t);
         }
     }
 
     /**
-     * Key v0.6 change: remove the matte Surface painted by TileExpandable itself.
-     * The optical gradient remains in the tile content, while a real Compose border
-     * gives the plate a crisp physical edge.
+     * Keep the actual Compose Surface transparent and draw a two-stage optical rim:
+     * a faint 1.45 dp glow plus a crisp 0.65 dp cool-white edge.
      */
     private static void installTransparentSurfaceAndBorderHook(
             final XC_LoadPackage.LoadPackageParam lpparam) {
@@ -373,7 +372,6 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
                                 boolean classicStyle = (Boolean) param.args[3];
                                 if (classicStyle) return;
 
-                                // Kill the matte Material surface completely.
                                 param.args[0] = transparentColorLambda;
 
                                 Object shapeObj = param.args[1];
@@ -382,38 +380,42 @@ public final class InfinityGlassHook implements IXposedHookLoadPackage {
 
                                 if (borderColorMethod != null && shapeObj != null && mod != null) {
                                     String shapeText = String.valueOf(shapeObj);
-                                    // Infinity X uses a zero-corner outer placeholder for one
-                                    // special circle path. Skip that placeholder to avoid a box rim.
                                     boolean zeroCornerPlaceholder = shapeText.contains("0.0.dp")
                                             && !shapeText.contains("50.0");
                                     if (!zeroCornerPlaceholder) {
-                                        Object bordered = borderColorMethod.invoke(
+                                        Object glow = borderColorMethod.invoke(
                                                 null,
                                                 mod,
-                                                Float.valueOf(1.0f),
-                                                Long.valueOf(withAlpha(COLOR_ICE, 108)),
+                                                Float.valueOf(1.45f),
+                                                Long.valueOf(withAlpha(COLOR_IOS_CYAN, 34)),
                                                 shapeObj);
-                                        if (bordered != null) {
-                                            param.args[4] = bordered;
+                                        Object crisp = borderColorMethod.invoke(
+                                                null,
+                                                glow != null ? glow : mod,
+                                                Float.valueOf(0.65f),
+                                                Long.valueOf(withAlpha(COLOR_ICE, 136)),
+                                                shapeObj);
+                                        if (crisp != null) {
+                                            param.args[4] = crisp;
                                             borderApplied = true;
                                         }
                                     }
                                 }
 
                                 if (FIRST_CLEAR_SURFACE.compareAndSet(false, true)) {
-                                    XposedBridge.log(TAG + " v0.6: CLEAR_SURFACE_ACTIVE; border="
+                                    XposedBridge.log(TAG + " v0.7: CLEAR_SURFACE_ACTIVE; doubleBorder="
                                             + borderApplied + " shape=" + String.valueOf(shapeObj));
                                 }
                             } catch (Throwable t) {
-                                XposedBridge.log(TAG + " v0.6: clear-surface frame failed: " + t);
+                                XposedBridge.log(TAG + " v0.7: clear-surface frame failed: " + t);
                             }
                         }
                     });
 
-            XposedBridge.log(TAG + " v0.6: transparent TileExpandable + real border hook installed; borderMethod="
+            XposedBridge.log(TAG + " v0.7: transparent surface + dual optical border installed; borderMethod="
                     + (borderColorMethod != null));
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " v0.6: unable to install transparent-surface hook: " + t);
+            XposedBridge.log(TAG + " v0.7: unable to install transparent-surface hook: " + t);
         }
     }
 
