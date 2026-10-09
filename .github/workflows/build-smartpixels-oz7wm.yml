@@ -17,8 +17,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - name: Android SDK
-        uses: android-actions/setup-android@v3
+      # ubuntu-latest already ships the Android SDK and sdkmanager.
+      # setup-android@v3 currently fails trying to install the removed 'tools' package.
       - name: Android 17 SDK API 37
         run: sdkmanager 'platforms;android-37' 'build-tools;37.0.0'
       - name: Extract source patch package
