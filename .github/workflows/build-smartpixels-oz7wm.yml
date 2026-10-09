@@ -20,7 +20,12 @@ jobs:
       # ubuntu-latest already ships the Android SDK and sdkmanager.
       # setup-android@v3 currently fails trying to install the removed 'tools' package.
       - name: Android 17 SDK API 37
-        run: sdkmanager 'platforms;android-37' 'build-tools;37.0.0'
+        run: |
+          SDKROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER="$(find "$SDKROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
+          test -x "$SDKMANAGER" || { echo "Missing sdkmanager" >&2; exit 1; }
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" 'platforms;android-37' 'build-tools;37.0.0'
       - name: Extract source patch package
         run: |
           mkdir -p smartpixels
