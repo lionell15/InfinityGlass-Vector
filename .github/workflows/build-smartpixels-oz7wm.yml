@@ -1,0 +1,46 @@
+name: SmartPixels oz7wm Android 17 APK
+on:
+  push:
+    branches: ['build/smartpixels-oz7wm-a17']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-smartpixels:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout isolated branch
+        uses: actions/checkout@v4
+      - name: JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Android 17 SDK API 37
+        run: sdkmanager 'platforms;android-37' 'build-tools;37.0.0'
+      - name: Extract source patch package
+        run: |
+          mkdir -p smartpixels
+          tar -xJf smartpixels_build_source.tar.xz -C smartpixels
+          test -s smartpixels/patch/Oz7wmModuleMain.java
+          test -s smartpixels/patch/apply_patch.py
+          test -s smartpixels/build.sh
+      - name: Build patched SmartPixels and KernelSU module
+        run: bash smartpixels/build.sh
+      - name: Verify APK and recovery ZIP
+        run: |
+          test -s smartpixels/out/SmartPixels-oz7wm-A17-rc1.apk
+          test -s smartpixels/out/SmartPixels_OZ7WM_A17_KernelSU_Next_rc1.zip
+          unzip -t smartpixels/out/SmartPixels_OZ7WM_A17_KernelSU_Next_rc1.zip
+          sha256sum smartpixels/out/SmartPixels-oz7wm-A17-rc1.apk
+      - name: Publish APK and KernelSU ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartPixels-oz7wm-A17-APK-and-KernelSU
+          path: |
+            smartpixels/out/SmartPixels-oz7wm-A17-rc1.apk
+            smartpixels/out/SmartPixels_OZ7WM_A17_KernelSU_Next_rc1.zip
+          if-no-files-found: error
