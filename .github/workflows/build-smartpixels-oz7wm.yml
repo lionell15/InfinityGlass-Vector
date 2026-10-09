@@ -25,7 +25,11 @@ jobs:
           SDKMANAGER="$(find "$SDKROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
           test -x "$SDKMANAGER" || { echo "Missing sdkmanager" >&2; exit 1; }
           yes | "$SDKMANAGER" --licenses >/dev/null || true
-          "$SDKMANAGER" 'platforms;android-37' 'build-tools;37.0.0'
+          "$SDKMANAGER" 'platforms;android-37.0' 'build-tools;37.0.0'
+          # Upstream uses compileSdk=37, whereas SDK Manager publishes android-37.0.
+          if [ ! -e "$SDKROOT/platforms/android-37" ]; then
+            ln -s "$SDKROOT/platforms/android-37.0" "$SDKROOT/platforms/android-37"
+          fi
       - name: Extract source patch package
         run: |
           mkdir -p smartpixels
